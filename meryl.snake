@@ -1,0 +1,55 @@
+# run blast on all files in fugu
+# replace qsub -pe orte blast64.sh
+
+import glob
+
+
+if not os.path.exists("log"):
+    os.makedirs("log")
+
+
+dictReadWithDir = {}
+aReadsNoDir = []
+with open( "reads.fofn", "r" ) as fReads:
+     
+    while( True ):
+        szRead = fReads.readline()
+        if ( szRead == "" ):
+            break
+
+
+        szRead = szRead.rstrip()
+        
+        szReadNoDir = os.path.basename( szRead )
+
+        aReadsNoDir.append( szReadNoDir )
+        dictReadWithDir[ szReadNoDir ] = szRead
+
+
+def szGetReadWithDir(wildcards):
+    return dictReadWithDir[ wildcards.szReadNoDir ]
+
+
+rule meryl_combine_merylfiles:
+	input: expand( "read_{szFileNoDir}.meryl", szFileNoDir = aReadsNoDir )
+	output: directory( "all.meryl" )
+	params: sge_opts=" -l mfree=8G"
+	run:
+
+		szListOfReadsNoDir = ""
+		for szRead in aReadsNoDir:
+			szListOfReadsNoDir += " "
+			szListOfReadsNoDir += "read_" + szRead + ".meryl"
+
+		szCommand = "module load canu/2.0 && meryl union-sum  " + szListOfReadsNoDir + " output all.meryl"
+		print( "about to execute: " + szCommand )
+		shell( szCommand )
+
+rule run_meryl_on_one_readfile:
+	output: directory( "read_{szReadNoDir}.meryl" )
+	input: szGetReadWithDir
+	params: sge_opts=" -l mfree=120G"
+	run:
+		szCommand = "module load canu/2.0 && meryl k=21 count " + str( input ) + " output " + str( output )
+		print( "about to execute: " + szCommand )
+		shell( szCommand )

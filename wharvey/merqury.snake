@@ -1,0 +1,137 @@
+import glob
+import pandas as pd
+import os
+
+if not os.path.exists("log"):
+	os.makedirs("log")
+
+
+SNAKEMAKE_DIR = os.path.dirname(workflow.snakefile)
+
+shell.prefix("source %s/env.cfg; " % (SNAKEMAKE_DIR))
+
+manifest_df = pd.read_csv('merqury.tab', header=0, index_col='SAMPLE', sep='\t').fillna('NA')
+
+localrules: all
+
+def find_fastq(wildcards):
+	fofn_df = pd.read_csv(list(manifest_df[manifest_df['ILLUMINA'] == wildcards.sample]['FOFN'].unique())[0], sep='\t', header=None, names=['fastq'])
+	return fofn_df.at[int(wildcards.read), 'fastq']
+
+def agg_reads(wildcards):
+	fofn_df = pd.read_csv(list(manifest_df[manifest_df['ILLUMINA'] == wildcards.sample]['FOFN'].unique())[0], sep='\t', header=None, names=['fastq'])
+	return expand(directory('meryl/{sample}/{read}_meryl'), sample=wildcards.sample, read=fofn_df.index)
+
+def find_hap_one(wildcards):
+	return manifest_df.at[wildcards.asm, 'H1']
+
+def find_hap_two(wildcards):
+	return manifest_df.at[wildcards.asm, 'H2']
+
+def find_meryl(wildcards):
+	return expand(directory('meryl/{sample}/{sample}_all_meryl'), sample=manifest_df.at[wildcards.asm, 'ILLUMINA'])
+
+def find_trios(wildcards):
+	return expand('merqury/{asm}/trio/{asm}_trio.spectra-asm.st.png', asm=manifest_df[manifest_df['TRIO'] == 'YES'].index)
+
+def find_mat_meryl(wildcards):
+	return expand(directory('meryl/{sample}/{sample}_all_meryl'), sample=manifest_df.at[wildcards.asm, 'MO_ID'])
+
+def find_pat_meryl(wildcards):
+	return expand(directory('meryl/{sample}/{sample}_all_meryl'), sample=manifest_df.at[wildcards.asm, 'FA_ID'])
+
+
+wildcard_constraints:
+	sample='|'.join(manifest_df['ILLUMINA'].unique()),
+	asm='|'.join(manifest_df.index),
+	read='\d+'
+
+
+rule all:
+	input:
+		expand('merqury/{asm}/{asm}_run.sh', asm=manifest_df.loc[manifest_df['H1'] != 'NA'].index),
+		find_trios
+
+rule run_meryl:
+	input:
+		fastq = find_fastq
+	output:
+		meryl = temp(directory('meryl/{sample}/{read}_meryl'))
+	params: 
+		sge_opts=" -l mfree=90G"
+	resources:
+		mem = lambda wildcards, attempt: attempt * 120,
+		hrs = 48
+	threads: 1
+	shell:
+		'''
+		meryl k=21 count memory={resources.mem} {input.fastq} output {output.meryl}
+		'''
+
+rule meryl_combine:
+	input: 
+		meryl = agg_reads
+	output: 
+		meryl = directory('meryl/{sample}/{sample}_all_meryl')
+	params: 
+		sge_opts=" -l mfree=8G"
+	resources:
+		mem = 8,
+		hrs = 48
+	threads: 1
+	run:
+		if len(input.meryl) == 1:
+			command = 'cp -rl {input.meryl} {output.meryl}'
+		else:
+			command = 'meryl union-sum {input.meryl} output {output.meryl}'
+		shell(command)
+
+
+rule merqury:
+	input:
+		meryl = find_meryl,
+		hap_one =  find_hap_one
+	output:
+		run = 'merqury/{asm}/{asm}_run.sh',
+		png = 'merqury/{asm}/{asm}.spectra-asm.st.png'
+	params:
+		hap_two = find_hap_two
+	resources:
+		mem = 4,
+		hrs = 96
+	threads: 16
+	run:
+		meryl_abs = os.path.abspath(str(input.meryl))
+		hap_one_abs = os.path.abspath(str(input.hap_one))
+		if params.hap_two.upper() == 'NA':
+			asm_all = [hap_one_abs]
+		else:
+			asm_all = [hap_one_abs, os.path.abspath(params.hap_two)]
+		shell('echo -e "#!/usr/bin/env bash \\n" >> {output.run}')
+		shell('cat {SNAKEMAKE_DIR}/env.cfg >> {output.run}')
+		shell('echo -e "merqury.sh %s %s %s" >> {output.run}' %(meryl_abs, ' '.join(asm_all), wildcards.asm))
+		shell('chmod 755 {output.run}')
+		shell('cd merqury/{wildcards.asm}/; ./{wildcards.asm}_run.sh; cd ../..')
+
+rule merqury_trio:
+	input:
+		mat_meryl = find_mat_meryl,
+		pat_meryl = find_pat_meryl,
+		asm_meryl = find_meryl,
+		hap_one = find_hap_one,
+		hap_two = find_hap_two
+	output:
+		run = 'merqury/{asm}/trio/{asm}_run.sh',
+		png = 'merqury/{asm}/trio/{asm}_trio.spectra-asm.st.png'
+	resources:
+		mem = 4,
+		hrs = 96
+	threads: 16
+	run: 
+		meryl_all = ' '.join([os.path.abspath(str(input.asm_meryl)), os.path.abspath(str(input.mat_meryl)), os.path.abspath(str(input.pat_meryl))])
+		asm_all = ' '.join([os.path.abspath(str(input.hap_one)), os.path.abspath(input.hap_two)])
+		shell('echo -e "#!/usr/bin/env bash \\n" >> {output.run}')
+		shell('cat {SNAKEMAKE_DIR}/env.cfg >> {output.run}')
+		shell('echo -e "merqury.sh %s %s %s" >> {output.run}' % (meryl_all, asm_all, '_'.join([wildcards.asm, 'trio'])))
+		shell('chmod 755 {output.run}')
+		shell('cd merqury/{wildcards.asm}/trio/; ./{wildcards.asm}_run.sh; cd ../..')
